@@ -99,7 +99,7 @@ Together, these tests provided statistical backing for the observed patterns in 
 
 ### **Project Output**
 The final analytical report is available as an interactive HTML file:  
-📄 **[`COVID19-VaccinationImpactAnalysis.html`](Analysis/COVID19-VaccinationImpactAnalysis.html)**  
+📄 **[`COVID19-VaccinationImpactAnalysis.html`](https://htmlpreview.github.io/?https://github.com/AishwaryaMaddula/COVID19-Vaccination-Impact-Analysis/blob/main/Analysis/COVID19-VaccinationImpactAnalysis.html)**  
 
 It includes visualizations, R code chunks, and results demonstrating the complete workflow and findings.
 
