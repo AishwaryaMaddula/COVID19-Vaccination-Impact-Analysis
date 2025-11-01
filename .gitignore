@@ -35,3 +35,7 @@ renv/cache/
 # JetBrains / RStudio IDE settings ----
 .idea/
 .vscode/
+
+# Git files
+.gitignore
+.gitattributes
