@@ -1,0 +1,41 @@
+# R and RStudio related ----
+.Rhistory
+.RData
+.Rproj.user/
+.Ruserdata
+.Rapp.history
+
+# R Markdown output ----
+*.utf8.md
+*.knit.md
+*.html
+*.pdf
+*.docx
+cache/
+*_cache/
+*_files/
+
+# Environment and package management ----
+.Renviron
+.Rprofile
+.packrat/
+renv/library/
+renv/staging/
+renv/cache/
+
+# Logs and temp files ----
+*.log
+*.tmp
+*.bak
+*.swp
+
+# macOS specific ----
+.DS_Store
+
+# JetBrains / RStudio IDE settings ----
+.idea/
+.vscode/
+
+# Git files
+.gitignore
+.gitattributes
