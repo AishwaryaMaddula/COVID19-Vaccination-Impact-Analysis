@@ -1,0 +1,920 @@
+---
+title: "Impact of Vaccinations on COVID-19 Deaths"
+author: "Aishwarya Maddula"
+date: "2024-04-30"
+output: html_document
+---
+```{r init, include=F}
+# Clear environment
+rm(list = ls())
+# Init libraries
+library(tidyr)
+library(dplyr)
+library(tidyverse)
+library(fastDummies)
+library(ggplot2)
+library(car)
+library(lubridate)
+library(MASS)
+library(broom)
+library(pander)
+# Set Knitr options
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, results = "markup", message = FALSE)
+# Set significant figures
+options(scientific=TRUE, digits = 3) 
+```
+
+# Introduction
+<div style="text-align:center; text-decoration: underline;">
+  ![Impact of Vaccinations on COVID-19
+Deaths](https://www.cidrap.umn.edu/sites/default/files/styles/article_detail/public/article/COVID%20vax%20on%20assembly%20line.jpg?itok=1xc4RkVi)
+</div>
+
+The COVID-19 pandemic was one of the most impactful medical events in human history. As one of the most deadly and wide spread infections in recorded history, it has changed American society in ways we are still trying to understand. One of the most obvious impacts was the death toll with nearly 1.2m Americans succumbing to the virus. While masking and social distancing likely helped limited the spread of the infection, only a vaccine could be considered a reasonable treatment against both infection and death for those infected.
+
+We chose to tackle the impact of vaccines on COVID-19 deaths by attempting to answer three key **SMART** questions: 
+
+- Did vaccinations impact survival rates from COVID-19 between 2020 and 2023?
+- Were there differences in COVID-19 survival rates between regions of the US?
+- Did policy choices made by states impact survival rates?
+
+These questions represent reasonable evaluations of the available data despite probable confounds that we can't directly deal with in an Exploratory Data Analysis (EDA).
+
+# Read in and format files
+
+Our first step was to read in and format the data from our data sources. This process is straight forward in so far as our data sources are federal, public datasets published on respected websites. This data is also longitudinal administrative data making it relatively reliable and timely ensuring a higher quality data product.
+
+## COVID-19 Cases
+
+The COVID Cases data was obtained from the [usafacts.org]<https://usafacts.org/visualizations/coronavirus-covid-19-spread-map/> which is a not-for-profit organisation that aggregates data from public sources. The explanation of their methodology can be found from here: \*
+<https://usafacts.org/articles/detailed-methodology-covid-19-data/>. Initial dataset contained 3194 rows and 1269 columns.
+
+```{r CovidCases}
+# Read in covid case data file
+# Source https://usafacts.org/visualizations/coronavirus-covid-19-spread-map/
+cases <- data.frame(read.csv("covid_confirmed_usafacts.csv"))
+# Drop unused (redundant) columns
+cases <- subset(cases, select = -c(1,2,4))
+# Aggregate by state
+cases <- aggregate(. ~ State, data = cases, FUN = sum)
+# Transpose dataset so that rows represent days and columns represent states
+cases <- pivot_longer(cases, cols = -State, names_to = "Date", values_to = "CovidCases")
+# Convert char string dates to date type
+cases$Date <- as.Date(cases$Date, format = "X%m.%d.%Y")
+# Fill missing days, select Mondays, and calculate weekly changes
+cases <- cases %>%
+   group_by(State) %>% #group by state
+   complete(Date = seq(min(Date), max(Date), by = "day")) %>% #pick min and max date in dataset and create a sequence by day.basically it is used for filling missing days
+   fill(CovidCases, .direction = "down") %>% #dates with missing covid cases are filled with previous day values until a non-na value is found
+   filter(wday(Date) == 2) %>% #filter all cases for mondays
+   mutate(Weekly_CovidCases = CovidCases - lag(CovidCases, 1)) %>%  #present monday's data - last monday's data
+   drop_na()  # Remove NAs 
+# Add one week lag to lineup with cases
+cases$Date <-  cases$Date %m+% weeks(1)
+head(cases)
+```  
+
+The Covid Data is initially aggregated from county wise to state wise, then transposed so that dates which were column headers initially were rows now. The initial data did not have covid cases count for all days, so we have generated list of dates considering the start date and end date in the list. Later, these days were mapped with the covid cases count present in the source and days that did not have case count in the source were marked with values of previous day. Once the daily covid count is obtained, weekly cases count in then calculated. However, we know that deaths typically occur after infection and the [CDC]<https://www.cdc.gov/nchs/nvss/vsrr/covid_weekly/index.htm> has provided guidence that death data is typically lagged 1-2 weeks behind. We therefore lagged our case data one week to align better with the death data. After all these transformations, the final data frame `r deparse(substitute(cases))`) had `r nrow(cases)` rows and `r ncol(cases)` columns
+
+## Deaths from COVID-19
+
+The COVID Deaths data was obtained from the same website  [usafacts.org]<https://usafacts.org/visualizations/coronavirus-covid-19-spread-map/>. This dataset also contained 3194 rows and 1269 columns.
+
+```{r CovidDeaths}
+# Read in covid deaths data file
+# Source https://usafacts.org/visualizations/coronavirus-covid-19-spread-map/
+deaths <- data.frame(read.csv("covid_deaths_usafacts.csv"))
+# Drop unused (redundant) columns
+deaths <- subset(deaths, select = -c(1,2,4))
+# Aggregate by state
+deaths <- aggregate(. ~ State, data = deaths, FUN = sum)
+# Transpose dataset so that rows represent days and columns represent states
+deaths <- pivot_longer(deaths, cols = -State, names_to = "Date", values_to = "DeathCount")
+# Convert char/string dates to date type
+deaths$Date <- as.Date(deaths$Date, format = "X%m.%d.%Y")
+# Fill missing days, select Mondays, and calculate weekly changes
+deaths <- deaths %>%
+   group_by(State) %>%
+   complete(Date = seq(min(Date), max(Date), by = "day")) %>%
+   fill(DeathCount, .direction = "down") %>%
+   filter(wday(Date) == 2) %>%  # Mondays
+   mutate(Weekly_DeathCount = DeathCount - lag(DeathCount, 1)) %>%
+   drop_na()  # Remove NAs from first calculation
+# Display example of finished data
+head(deaths)
+```
+
+The cleanup for deaths data is also done in the same way as cases.  After the cleanup, data frame `r deparse(substitute(deaths))` had `r nrow(deaths)` rows and `r ncol(deaths)` columns
+
+## Individuals Vaccinatinated Against COVID-19
+
+Vaccination data is obtained from the source [cdc.gov]<https://www.cdc.gov/coronavirus/2019-ncov/vaccines/index.html>. It contained 38489 rows and 109 columns.
+
+```{r Vaccination}
+# Read in population data file
+vaccination <- data.frame(read.csv("Vaccination.csv"))
+# Convert char string dates to date type
+vaccination$Date <- mdy(vaccination$Date)
+# Split data
+vacc_all <- vaccination[, c("Date", "State", "Administered_Dose1_Pop_Pct")]
+vacc_65 <- vaccination[, c("Date", "State", "Administered_Dose1_Recip_65PlusPop_Pct")]
+# Fill missing days, select Mondays, and calculate weekly changes
+vacc_all <- vacc_all %>%
+   group_by(State) %>%
+   complete(Date = seq(min(Date), max(Date), by = "day")) %>%
+   fill(Administered_Dose1_Pop_Pct, .direction = "down") %>%
+   filter(wday(Date) == 2) %>%  # Mondays
+   mutate(Weekly_Vacc_all = Administered_Dose1_Pop_Pct - lag(Administered_Dose1_Pop_Pct, 2)) %>%
+   drop_na()  # Remove NAs from first calculation
+# Fill missing days, select Mondays, and calculate weekly changes
+vacc_65 <- vacc_65 %>%
+   group_by(State) %>%
+   complete(Date = seq(min(Date), max(Date), by = "day")) %>%
+   fill(Administered_Dose1_Recip_65PlusPop_Pct, .direction = "down") %>%
+   filter(wday(Date) == 2) %>%  # Mondays
+   mutate(Weekly_Vacc_65 = Administered_Dose1_Recip_65PlusPop_Pct - lag(Administered_Dose1_Recip_65PlusPop_Pct, 2)) %>%
+   drop_na()  # Remove NAs from first calculation
+#Merge back together
+vaccination <- merge(vacc_all, vacc_65, by = c("Date", "State"), all = TRUE)
+# Display example of finished data
+vaccination$Date <-  vaccination$Date %m+% weeks(2)
+head(vaccination)
+```
+For this dataset as well, we performed the same process of data cleaning as cases, deaths but separately for vaccinations of all age groups and 65plus separately and later merged the results to single dataframe `r deparse(substitute(vaccination))` that contained `r nrow(vaccination)` rows and `r ncol(vaccination)` columns. As with cases, the [CDC]<https://www.cdc.gov/coronavirus/2019-ncov/vaccines/different-vaccines/how-they-work.html> notes that vaccinations can take "a few weeks" to be effective. We therefore lagged the vaccination data two weeks to better align with deaths.
+
+## Policies Implemented
+
+We also wanted to examine how state policy impacted covid deaths. To do so, we have obtained a dataset of state and county COVID-19 policies from [healthdata.gov]<https://healthdata.gov/dataset/COVID-19-State-and-County-Policy-Orders/gyqz-9u7n/about_data>. The data contained 4219 rows and 11 columns representing the start and stop days of policies meant to limit the spread of COVID-19.
+
+```{r PolicyData}
+# ## Prepare Policy Data
+# policy <- read.csv("COVID-19_State_and_County_Policy_Orders_20240420.csv")
+# # Filter out county data
+# policy <- subset(policy, policy_level=="state")
+# policy <- policy %>%
+#   select(date, state_id, policy_type, start_stop) %>% 
+#   filter(policy_type %in% c("Mandate Face Mask Use By All Individuals In Public Spaces",
+#                             "Mandate Face Mask Use By All Individuals In Public Facing Businesses",
+#                             "Food and Drink")) %>%
+#   unique()  # Remove duplicates
+
+# # Split start and end dates
+# start<- subset(policy, start_stop=="start")
+# colnames(start)[which(names(start) == "date")] <- "start"
+# stop<- subset(policy, start_stop=="stop")
+# colnames(stop)[which(names(stop) == "date")] <- "stop"
+# # Merge back together
+# adj_policy <- merge(start, stop, by.x=c('state_id', 'policy_type'), by.y=c('state_id', 'policy_type'), all=T)
+# # Drop unused columns
+# adj_policy <- adj_policy[,c("state_id", "policy_type", "start", "stop")]
+# # Backfill missing end dates
+# adj_policy$stop[is.na(adj_policy$stop)] <- "2022/12/31"
+# # Convert date from character to Date type
+# adj_policy$start <- as.Date(adj_policy$start, format = "%Y/%m/%d")
+# # Convert date from character to Date type
+# adj_policy$stop <- as.Date(adj_policy$stop, format = "%Y/%m/%d")
+# # Save out to check data
+# write.csv(adj_policy, "Policy check.csv")
+# NOTE: There were 5 cases where the start/stop dates were reversed in the data and 6 cases had the same start/stop dates. These were manually corrected and read back in.
+adj_policy <- read.csv("Policy check.csv")
+# Format dates
+adj_policy$start<- mdy(adj_policy$start) #converting to proper date objects in R using mdy function
+adj_policy$stop<- mdy(adj_policy$stop) 
+# Fill missing dates
+for(i in 1:nrow(adj_policy)){  #looping the dataset from row 1 to last row
+    Date <- as.Date(seq(adj_policy[i, 3], adj_policy[i, 4], by = "days")) #generating dates from start date to end date for each row
+    policy_type <- rep(adj_policy[i, 2], length(Date)) #replicate policytype for each date generated above
+    State <- rep(adj_policy[i, 1], length(Date)) #replicate state value for each date generated above
+    tmp<- data.frame(cbind(policy_type, State)) #merge policytype and state columns and store to tmp dataframe
+    # note, this is done because cbind converts dates to numerics
+    tmp$Date <- Date #merge date columns to tmp df
+    if(exists('long_policy')){  #storing the generated dates into long-policy
+        long_policy <- rbind(long_policy, tmp)
+    } else {
+        long_policy <-tmp
+    }
+}
+# Create dummies for the policies
+long_policy <- dummy_cols(long_policy, select_columns = "policy_type")
+# Fix column names
+colnames(long_policy)[which(names(long_policy) == "policy_type_Mandate Face Mask Use By All Individuals In Public Facing Businesses")] <- "Masks_Bus"
+colnames(long_policy)[which(names(long_policy) == "policy_type_Mandate Face Mask Use By All Individuals In Public Spaces")] <- "Masks_Public"
+colnames(long_policy)[which(names(long_policy) == "policy_type_Food and Drink")] <- "Food_Drink"
+# Drop policy type column
+long_policy<- long_policy[ , c("State", "Date", "Food_Drink", "Masks_Bus", "Masks_Public")]
+# Display the long_policy
+head(long_policy)
+```
+
+We first filtered the dataset to include only state level policies. Next, we picked policies that we felt were likely to be impactful and were more widely applied like "Mandate Face Mask Use By All Individuals In Public Facing Businesses", "Mandate Face Mask Use By All Individuals In Public Spaces" and "policy_type_Food and Drink". We have then created new columns called as Start and Stop that indicates policy implementation state. Basis this, dummies were created for each day if policy was present or not.
+
+## Merge Datasets Together
+
+Having cleaned the individual data files to include date and state as a primary key, we then merged deaths, cases, vaccines, and policy into a single dataset on these keys. To account for policies not in place during the time when we had data for other variables, we also back filled 0s to represent no policy where NAs were induced due to the merge.
+```{r Merge_Dataset}
+## Merge Datasets Together
+# Merge cases, deaths, and vaccination data first
+df <- merge(cases, deaths, by = c("Date", "State"), all = TRUE)
+df <- merge(df, vaccination, by = c("Date", "State"), all.x = TRUE)
+
+# Now merge the policy data
+df <- merge(df, long_policy, by = c("Date", "State"), all = TRUE)
+
+# Replace NAs with appropriate values, adjust according to data understanding
+df[is.na(df)] <- 0 #basically where policy is not present, for those dates, 0 is filled
+
+# Display example of finished data
+head(df)
+```
+
+## Mapping state to region and creating dummies
+
+We also believe that there is some regionality to our data. The literature indicates that policy diffuses locally faster than nationally and travel restrictions intended to limit the spread of the virus would indicate that regional deaths might be correlated. To check this, we included a variable representing regional groupings based on [US Census]<https://www2.census.gov/geo/pdfs/maps-data/maps/reference/us_regdiv.pdf> regions.
+```{r State to Region}
+# Region region key
+regions <- data.frame(read.csv("StatetoRegion.csv"))
+# Merge region into master file
+df <- merge(df, regions, by = "State", all.x = TRUE)
+# Generate dummy variables for region
+df <- dummy_cols(df, select_columns = "Region")
+# Drop region column
+df$Region <- NULL
+# Drop false states
+df <- df %>% drop_na(Region_MidWest)
+# View the dataframe with dummy variables
+head(df)
+```
+
+## EDA
+For midterm, we have done EDA region-wise based on SMART questions chosen then. For final, we have decided to analyze further at state-level and so thorough EDA analysis has been done for the same. We started our analysis with checking if there were any null values. 
+Initially, we accidentally removed negative values thinking it was an error within the data. But later we realized that those negative values have to be considered and they are result of not lagging the vaccination information by 2 weeks.
+
+```{r EDA}
+summary(df)
+#checking if there are any null values
+sum(is.na(df))
+```
+We found no missing values in our dataset. This is by design, but checking to make sure none had been added is smart before we begin the EDA.
+Next we focused on outlier removal in the data for critical columns. We started with plotting COVID-19 cases per each state before outlier removal, performed outlier removal using 1.5 Inter Quartile Range which is commonly used in Statistics and updated the dataframe accordingly, plotted the COVID-19 cases per state after removing outliers.
+```{r EDA-1}
+# Boxplot of number of COVID-19 cases by state before removing outliers
+ggplot(df, aes(x = State, y = Weekly_CovidCases)) +
+  geom_boxplot() +
+  labs(title = "Box Plot of COVID-19 Cases by State (Before removing outliers)", x = "State", y = "COVID-19 Cases") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#selecting the columns that are critical for analysis and then removing outlier for them
+columns_to_clean <- c("CovidCases", "Weekly_CovidCases", "DeathCount", "Weekly_DeathCount",
+                      "Administered_Dose1_Pop_Pct", "Weekly_Vacc_all", "Administered_Dose1_Recip_65PlusPop_Pct", "Weekly_Vacc_65")
+
+#defining a function to recursively remove outliers for all required columns
+remove_outliers <- function(data) {
+  #calculating interquartile range
+  q1 <- quantile(data, 0.25, na.rm = TRUE)
+  q3 <- quantile(data, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  #defining lower and upper bounds based on commonly used 1.5 IQR rule
+  lower_bound <- q1 - 1.5 * iqr
+  upper_bound <- q3 + 1.5 * iqr
+  # Removing outliers (i.e value that is outside lower and upper bound)
+  data_clean <- data[which(data >= lower_bound & data <= upper_bound)]
+  return(list(cleaned_data = data_clean, lower_bound = lower_bound, upper_bound = upper_bound))
+}
+
+# Applying the function and plotting
+for (column in columns_to_clean) {
+  #calling the function defined above to remove outliers
+  results <- remove_outliers(df[[column]])
+  #updating dataframe after removing outliers and saving to df_clean
+  df_clean <- df %>%
+    filter(!!sym(column) >= results$lower_bound & !!sym(column) <= results$upper_bound)
+  # Plotting histogram for each column before outlier removal
+  p_before <- ggplot(df, aes_string(x = column)) +
+    geom_histogram(binwidth = (max(df[[column]], na.rm = TRUE) - min(df[[column]], na.rm = TRUE)) / 30, fill = "skyblue") +
+    ggtitle(paste("Before Outlier Removal -", column))
+  print(p_before)
+  # Plotting histogram for each column after outlier removal
+  p_after <- ggplot(df_clean, aes_string(x = column)) +
+    geom_histogram(binwidth = (max(df_clean[[column]], na.rm = TRUE) - min(df_clean[[column]], na.rm = TRUE)) / 30, fill = "skyblue") +
+    ggtitle(paste("After Outlier Removal -", column))
+  print(p_after)
+}
+
+df <- df_clean
+# Boxplot for COVID-19 cases by state after removing outliers
+ggplot(df, aes(x = State, y = Weekly_CovidCases)) +
+  geom_boxplot() +
+  labs(title = "Box Plot of COVID-19 Cases by State (after removing outliers)", x = "State", y = "COVID-19 Cases") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The next set of visualizations show our three largest variables, Deaths, Cases and Vaccines over time for each state. We tried coming up with a clever solution for displaying all the states in a single graph to better visualize each variables impact on each state. The faceted time series graphs below do a great job of displaying a huge amount of data in a single image. From the below graphs you can see a huge spikes in vaccines administered, cases and deaths in certain states.
+
+```{r EDA-2}
+# GGplots of Deaths, Cases and Vaccines
+# COVID deaths over time by state
+ggplot(df, aes(x = Date, y = Weekly_DeathCount)) +
+    geom_line() +
+    theme_minimal() +
+    labs(title = "COVID Deaths Over Time", x = "Date", y = "Deaths")
+# COVID cases over time by state
+ggplot(df, aes(x = Date, y = Weekly_CovidCases, color = State)) +
+    geom_line() +
+    theme_minimal() +
+    labs(title = "COVID Cases Over Time by State", x = "Date", y = "COVID Cases")
+# Vaccination rates over time by state
+ggplot(df, aes(x = Date, y = Weekly_Vacc_all, color = State)) +
+    geom_line() +
+    theme_minimal() +
+    labs(title = "Vaccination Rates Over Time by State",
+         x = "Date",
+         y = "Vaccination Rate (%)")
+
+#creating new dataframe with a new column called as region for better plotting wrt region
+new_df <- df %>%
+  mutate(Region = case_when(
+    Region_MidWest == 1 ~ "MidWest",
+    Region_NorthEast == 1 ~ "NorthEast",
+    Region_South == 1 ~ "South",
+    Region_West == 1 ~ "West",
+    TRUE ~ "Other"  # Default case if none of the above is true
+  ))
+
+# Faceted time series plot for Covid Cases in different Regions
+ggplot(new_df, aes(x=Date, y=Weekly_CovidCases, color=Region)) +
+    geom_line() +
+    facet_wrap(~State) +
+    ggtitle("Daily Covid Cases by Region")
+# Faceted time series plot for Covid Cases in different Regions
+ggplot(new_df, aes(x=Date, y=Weekly_DeathCount, color=Region)) +
+    geom_line() +
+    facet_wrap(~State) +
+    ggtitle("Daily Covid Deaths by Region")
+# Faceted time series plot for Covid Cases in different Regions
+ggplot(new_df, aes(x=Date, y=Weekly_Vacc_all, color=Region)) +
+    geom_line() +
+    facet_wrap(~State) +
+    ggtitle("Daily Covid Vaccines by Region")
+
+
+# Faceted time series plot for Covid Cases in different states
+ggplot(df, aes(x=Date, y=Weekly_CovidCases, color=State)) +
+    geom_line() +
+    facet_wrap(~State) +
+    ggtitle("Daily Covid Cases by State")
+# Faceted time series plot for Covid Cases in different states
+ggplot(df, aes(x=Date, y=Weekly_DeathCount, color=State)) +
+    geom_line() +
+    facet_wrap(~State) +
+    ggtitle("Daily Covid Deaths by State")
+# Faceted time series plot for Covid Cases in different states
+ggplot(df, aes(x=Date, y=Weekly_Vacc_all, color=State)) +
+    geom_line() +
+    facet_wrap(~State) +
+    ggtitle("Daily Covid Vaccines by State")
+```
+
+Now, we wanted to check how vaccinations played role with respect to cases and deaths in each state, region as well. We tried to plot few visualizations and found that there was a large spike in almost every state when the vaccine initially rolled out, and that California, Texas and New York were already experiencing a huge number of reported cases as well.
+
+```{r EDA-3}
+#Creating a State Summary here for later creating a scatter plot basis this for state level
+state_summary <- df %>%
+  group_by(State) %>%
+  summarize(
+    Total_Weekly_CovidCases = sum(Weekly_CovidCases, na.rm = TRUE),  # Total weekly COVID cases
+    Total_Weekly_DeathCount = sum(Weekly_DeathCount, na.rm = TRUE),  # Total weekly deaths
+    Avg_Weekly_VaccinationRate = mean(Weekly_Vacc_all, na.rm = TRUE),  # Average weekly vaccination rate
+    Total_CovidCases = sum(CovidCases, na.rm = TRUE),  # Total COVID cases
+    Total_DeathCount = sum(DeathCount, na.rm = TRUE),  # Total deaths
+    Avg_VaccinationRate = mean(Administered_Dose1_Pop_Pct, na.rm = TRUE),  # Average vaccination rate
+    Avg_VaccinationRate_65Plus = mean(Administered_Dose1_Recip_65PlusPop_Pct, na.rm = TRUE)  # Average vaccination rate for 65+
+  )
+
+# Scatter plot for COVID-19 Cases vs Vaccination Rate at state level
+ggplot(state_summary, aes(x = Avg_Weekly_VaccinationRate, y = Total_Weekly_CovidCases)) +
+  geom_point(aes(color = State), size = 3) +  
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Relationship Between Weekly Vaccination Rate and Weekly COVID-19 Cases by State",
+       x = "Average Weekly Vaccination Rate (%)",
+       y = "Total Weekly COVID-19 Cases",
+       color = "State") +
+  theme_minimal()
+
+# Scatter plot for COVID-19 Death count vs Vaccination Rate at state level
+ggplot(state_summary, aes(x = Avg_Weekly_VaccinationRate, y = Total_Weekly_DeathCount)) +
+  geom_point(aes(color = State), size = 3) +  
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Relationship Between Weekly Vaccination Rate and Weekly Death by State",
+       x = "Average Weekly Vaccination Rate (%)",
+       y = "Total Weekly COVID-19 Cases",
+       color = "State") +
+  theme_minimal()
+
+#Region summary for plotting at region level 
+region_summary <- new_df %>%
+  group_by(Region) %>%
+  summarize(
+    Total_Weekly_CovidCases = sum(Weekly_CovidCases, na.rm = TRUE),  # Total weekly COVID cases
+    Total_Weekly_DeathCount = sum(Weekly_DeathCount, na.rm = TRUE),  # Total weekly deaths
+    Avg_Weekly_VaccinationRate = mean(Weekly_Vacc_all, na.rm = TRUE),  # Average weekly vaccination rate
+    Total_CovidCases = sum(CovidCases, na.rm = TRUE),  # Total COVID cases
+    Total_DeathCount = sum(DeathCount, na.rm = TRUE),  # Total deaths
+    Avg_VaccinationRate = mean(Administered_Dose1_Pop_Pct, na.rm = TRUE),  # Average vaccination rate
+    Avg_VaccinationRate_65Plus = mean(Administered_Dose1_Recip_65PlusPop_Pct, na.rm = TRUE)  # Average vaccination rate for 65+
+  )
+
+#Scatter plot of COVID-19 Cases vs Vaccination Rate at Region level
+ggplot(region_summary, aes(x = Avg_Weekly_VaccinationRate, y = Total_Weekly_CovidCases, color = Region)) +
+  geom_point(size = 3) +  
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Relationship Between Weekly Vaccination Rate and Weekly COVID-19 Cases by Region",
+       x = "Average Weekly Vaccination Rate (%)",
+       y = "Total Weekly COVID-19 Cases",
+       color = "Region") +
+  theme_minimal()
+
+#Scatter plot of COVID-19 Death Count vs Vaccination Rate at Region level
+ggplot(region_summary, aes(x = Avg_Weekly_VaccinationRate, y = Total_Weekly_DeathCount, color = Region)) +
+  geom_point(size = 3) +  
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Relationship Between Weekly Vaccination Rate and Weekly Death by Region",
+       x = "Average Weekly Vaccination Rate (%)",
+       y = "Total Weekly COVID-19 Cases",
+       color = "Region") +
+  theme_minimal()
+```
+
+Next, we tried to visualize if there is any correlation between COVID-19 Cases, Deaths and Vaccination Rates. We started with selecting the required columns and then found correlation matrix, visualized as a heatmap.
+
+```{r EDA-4}
+# selecting the required columns for checking correlation matrix.
+cor_columns <- c("Weekly_CovidCases", "Weekly_DeathCount", "Weekly_Vacc_all", "CovidCases", "DeathCount", "Administered_Dose1_Pop_Pct")
+cor_matrix <- cor(df[cor_columns], use = "complete.obs")
+
+#Heatmap of the correlation matrix
+ggplot(data = as.data.frame(as.table(cor_matrix)), aes(Var1, Var2, fill = Freq)) +
+    geom_tile() +
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +  
+    theme_minimal() +
+    labs(title = "Correlation Matrix of COVID-19 Metrics (Weekly and Total)",
+         x = "Variables",
+         y = "Variables",
+         fill = "Correlation Coefficient") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.title.x = element_blank(), 
+          axis.title.y = element_blank())  
+```
+
+Later we were interested to check the frequency distribution of cases by state and mask policy and so we decided to view contigency table. Some key take aways we gleaned from the below data include; larger states like California (CA) and Texas (TX) haved notably higher case counts; several states, such as Arizona, Florida and Georgia, show significant case numbers with no reported cases under a mask mandate, suggesting either a strong resistance to mask mandates or that mandates were introduced too late or removed too early. Additionally, D, MO, MT, NE, OK, SC, SD, TN, and WY show COVID-19 cases only in the 'No Mask' category.
+
+```{r EDA-5}
+# Basic contingency table to see the distribution of cases by state and mask policy
+mask_policy_table_basic <- table(df$State, df$Masks_Public)
+
+#summary for viewing better
+df_summary <- df %>%
+  group_by(State, Masks_Public) %>%
+  summarize(
+    Total_CovidCases = sum(CovidCases, na.rm = TRUE),  
+    Total_Weekly_CovidCases = sum(Weekly_CovidCases, na.rm = TRUE),
+    Total_Weekly_DeathCount = sum(Weekly_DeathCount, na.rm = TRUE), 
+    Avg_Weekly_VaccinationRate = mean(Weekly_Vacc_all, na.rm = TRUE),  
+    Total_DeathCount = sum(DeathCount, na.rm = TRUE), 
+    .groups = 'drop'
+  )
+
+#visualizing contingency table
+mask_policy_table_detailed <- xtabs(Total_CovidCases ~ State + Masks_Public, data = df_summary)
+print(mask_policy_table_detailed)
+```
+
+Finally, in the last set of graphs we wanted to clearly display on a state to state level the comparison of mask policy vs deaths, cases and vaccine rates. The results below show states before and after implementing the mask mandate, and states that never implemented it. Cases and deaths are higher across the board for stats that never implemented a mask mandate, while states that did saw drops between their unmasked numbers. Interestingly, in the fourth graphic below, 3 states stand out as having high vaccine rate, but no mask mandate. Tennessee, South Dakota and Idaho all have unusually high vaccine rates, suggesting either an issue with reporting, or perhaps these states implemented vaccine policies or rollouts to offset the lack of mask mandate.
+
+```{r EDA-6}
+#Total Weekly COVID-19 Cases
+ggplot(df_summary, aes(x = State, y = Total_Weekly_CovidCases, fill = as.factor(Masks_Public))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("No Mask Mandate", "Mask Mandate")) +
+  labs(title = "Total Weekly COVID-19 Cases by State and Mask Policy",
+       x = "State",
+       y = "Total Weekly Cases",
+       fill = "Mask Policy") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Total Weekly Death Count
+ggplot(df_summary, aes(x = State, y = Total_Weekly_DeathCount, fill = as.factor(Masks_Public))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("No Mask Mandate", "Mask Mandate")) +
+  labs(title = "Total Weekly Death Count by State and Mask Policy",
+       x = "State",
+       y = "Total Weekly Deaths",
+       fill = "Mask Policy") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Average Weekly Vaccination Rate
+ggplot(df_summary, aes(x = State, y = Avg_Weekly_VaccinationRate, fill = as.factor(Masks_Public))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("No Mask Mandate", "Mask Mandate")) +
+  labs(title = "Average Weekly Vaccination Rate by State and Mask Policy",
+       x = "State",
+       y = "Average Weekly Vaccination Rate (%)",
+       fill = "Mask Policy") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Total COVID-19 Cases
+ggplot(df_summary, aes(x = State, y = Total_CovidCases, fill = as.factor(Masks_Public))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("No Mask Mandate", "Mask Mandate")) +
+  labs(title = "Total COVID-19 Cases by State and Mask Policy",
+       x = "State",
+       y = "Total COVID-19 Cases",
+       fill = "Mask Policy") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Total Death Count
+ggplot(df_summary, aes(x = State, y = Total_DeathCount, fill = as.factor(Masks_Public))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("red", "blue"), labels = c("No Mask Mandate", "Mask Mandate")) +
+  labs(title = "Total Death Count by State and Mask Policy",
+       x = "State",
+       y = "Total Deaths",
+       fill = "Mask Policy") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+## Hypothesis Testing
+
+After completing the EDA we wanted to check if reaching a certain threshold of vaccination was
+supportive of the hypothesis that vaccination was reducing the number of
+covid deaths. Since the CDC didn't specifically reccomend a threshold
+that represented a reasonable level when we could expect vaccinations to
+slow deaths, we chose a 30% vaccination rate for the US. The reference
+US population for the COVID data we used was 328,239,523 so 30% was
+98,471,857 which was suprassed on 11/3/2021. We applied the 20% threshold 
+state buy state meaning that this threshold was reached on a variety of dates 
+centered around the national threshold date.
+
+```{r T-TEST}
+# Apply threshold to create new binary indicator
+df$death_case_ratio <- with(df, ifelse(CovidCases > 0, DeathCount / CovidCases, 0))
+df$threshold_30 <- ifelse(df$Administered_Dose1_Pop_Pct >= 30, "after", "before")
+
+# T-test for deaths
+t_deaths <- t.test(DeathCount ~ threshold_30, data = df)
+# T-test for cases
+t_cases <- t.test(CovidCases ~ threshold_30, data = df)
+# T-test for death/case ratio
+t_ratio <- t.test(death_case_ratio ~ threshold_30, data = df)
+```
+
+`r print(t_deaths)`
+For deaths we found that the p-Value was effectively 0 allowing us to reject the null hypothesis. 
+Our results indicate that cases increased after the threshold was met. This also isn't surprising 
+as the pandemic was just getting started in most states and even a 30% vaccination rate still meant 
+many were still vulnerable.
+
+
+`r print(t_cases)`
+For cases we found that the  p-Value was effectively 0 allowing us to reject the null hypothesis. 
+Our results indicate that cases increased after the threshold was met. This also isn't surprising 
+for the same reason as above.
+
+
+`r print(t_ratio)`
+For ration of death/case we found that the p-Value was effectively 0 allowing us to reject the null hypothesis. 
+This result indicates that the death/case ratio was lower after the threshold was met. This was the 
+intent of the vaccination and suggests that it was effective. However, a single t-test isn't sufficient 
+evidence.
+
+## ANOVA for Regions
+
+```{r region_adj}
+#Build regions as factors
+df$Region <- ifelse(df$Region_MidWest == 1, "MidWest",
+                    ifelse(df$Region_NorthEast == 1, "NorthEast",
+                           ifelse(df$Region_South == 1, "South", "West")))
+df$Region <- as.factor(df$Region)
+```
+
+We also wanted to test the hypothesis that the regions were typically similar. 
+We start with a visual inspection of the regional data:
+`r scatterplot(DeathCount ~ CovidCases | Region, data=df,
+   xlab="Deaths per Week", ylab="Cases per Week",
+   main="Scatter Plot of Cases and Deaths by Region")`
+
+This plot indicate that while the relationship between cases and deaths is clearly positive, the slope of 
+the positive relationship seems different between regions (see trend lines). To check this, we can run an 
+ANOVA test to determine if the variation between groups was higher than the variation within the groups. 
+```{r ANOVA}
+#one way anova
+# Ho: The mean among the regions were the same
+# Ha: The mean among the regions differed
+
+# ANOVA for deaths across the regions
+anova_deaths <- aov(DeathCount ~ Region, data = df)
+
+# ANOVA for cases across the regions
+anova_cases <- aov(CovidCases ~ Region, data = df)
+
+# ANOVA for death/case ratio across regions
+anova_ratio <- aov(death_case_ratio ~ Region, data = df)
+```
+`r pander(anova(anova_deaths))`
+For deaths we find that there is certainly a regional component with the p-value close to 0 indicating 
+that the between region means are quite different.
+
+`r pander(anova(anova_cases))`
+Here too for casers deaths we find that there is certainly a regional component with the p-value close to 0 indicating 
+that the between region means are quite different.
+
+`r pander(anova(anova_ratio))`
+However, we a re most interested in how the ratio between deaths and cases differs between regions. 
+For the death/case ratio we find that there are still differences between the regional means, p-value is less than 
+0.05 at 1.1e5, but larger than either of the two components of the ratio. This indicates that the relationship isn't 
+as strong and we might need to check the interactions with a Post-hoc test.
+
+## Post-Hoc Testing
+
+A Tukey post-hoc test allows us to determine which region interactions might be significant rather than just 
+the overall significance of the ANOVA test.
+
+```{r Pot-hoc}
+# Post-hoc test for deaths
+posthoc_deaths <- TukeyHSD(anova_deaths)
+# Post-hoc test for cases
+posthoc_cases <- TukeyHSD(anova_cases)
+# Post-hoc test for death/case ratio
+posthoc_ratio <- TukeyHSD(anova_ratio)
+```
+
+`r pander(summary(posthoc_ratio))`
+Again, as we are most interested in the death/case ratio we examine the Tukey test for that outcome. As we 
+surmised earlier, the interactions between regions aren’t all significant. In fact, the differences between 
+South-Northeast and West-Northeast are the only significant interactions (South-Midwest is just short of the 0.05 
+threshold). This is confirms what we saw in the graphical inspection as the slopes of Northeast was the steepest 
+while Midwest was in the middle of the group.
+
+## ANOVA for Year
+
+We also might think that there may be a difference between years in the pandemic. While a true time series model 
+is a bit out of our scope, including time dummies will serve a similar purpose. Since we believe that the impacts of 
+COVID changed over time, think the variants of the virus appearing, we want to check if the death/case rate changed 
+year over year. To do this, we run an ANOVA test.
+
+
+```{r year}
+# Extract year from date
+df$Year <- format(df$Date, format="%Y")
+```
+
+
+To test the hypothesis that the years were typically similar. 
+We start with a visual inspection of the regional data:
+`r scatterplot(DeathCount ~ CovidCases | Year, data=df,
+   xlab="Deaths per Week", ylab="Cases per Week",
+   main="Scatter Plot of Cases and Deaths by Region")`
+
+This plot indicate that while the relationship between cases and deaths is clearly  positive, the slope of 
+the positive relationship seems different between years (see trend lines). To check this, we can run an 
+ANOVA test to determine if the variation between groups was higher than the variation within the groups. 
+```{r ANOVA_Year, results="markup"}
+#one way anova
+# Ho: The mean among the years were the same
+# Ha: The mean among the years differed
+
+# ANOVA for death/case ratio across regions
+anova_ratio_y <- aov(death_case_ratio ~ Year, data = df)
+# Post-hoc test for death/case ratio
+posthoc_ratio_y <- TukeyHSD(anova_ratio_y)
+```
+`r pander(anova(anova_ratio_y))`
+
+The result is that the p-value is close to 0 and thus we reject the null hypothesis and can confirm that the 
+means among years are likely more different than the means within years. We again ran a Tukey post-hoc test 
+to see where the relationships between years were the most different.
+
+`r pander(summary(posthoc_ratio_y))`
+
+For most years, the mean of death/case is different. Only the 2022-2021 relationship isn't significant, but 
+it is quite close to our threshold. This indicates that we should also conder these variables in our regression.
+
+## Linear modeling
+
+Given our findings in hypotheses testing, it's logical to move to a regression model to examine the relationships 
+between death/case ratio and factors like policy, vaccination, and region. As our outcome variable, death/case, is 
+continuous we will start by fitting an OLS regression and checking our assumptions. As our variable of interest, 
+vaccination rate, is also continuous, we can model this relationship directly as our base (reference) model. However, 
+we will want to rescale the values to help keep the interpretation simple. Thus we divide the percentage by 100.
+
+
+```{r OLS}
+# Rescale
+df$Administered_Dose1_Pop_Pct <- df$Administered_Dose1_Pop_Pct/100
+# Base model
+base <- lm(death_case_ratio ~ Administered_Dose1_Pop_Pct, data = df)
+```
+`r pander(summary(base))`
+The relationship between death/case ratio and vaccination rate is significant and positive. Since we might 
+hypothesize that this relationship should be negative based on other research, there's clearly something driving 
+death/case ratio beyond vaccinations. This is reflected in the low adjusted R^2 (explanation of variance) value 
+`r summary(base)$adj.r.squared`. Thus it makes sense to begin adding other variables we have shown to be of 
+importance.
+
+Let's start with regionality. We previous built dummies for regions so let's re-run the regression with those added.
+
+```{r OLS_2}
+reg_1 <- lm(death_case_ratio ~ Administered_Dose1_Pop_Pct + Region_NorthEast + Region_South + Region_West, data = df)
+```
+`r pander(summary(reg_1))`
+
+This had an marginal improvement on the adjusted R^2 value raising it to a still low `r summary(reg_1)$adj.r.squared`. 
+However, the model shows regionality is certainly correlated with the death/case ratio. I will note that the 
+midwest region was removed from the regression to prevent autocorrelation. It is now the reference.
+
+We can next add in some policy values to see if that improves the model. These are already dummies in our data so 
+no special action is required to transform them.
+
+```{r OLS_3}
+reg_2 <- lm(death_case_ratio ~ Administered_Dose1_Pop_Pct + Region_NorthEast + Region_South + Region_West + Food_Drink + Masks_Bus + Masks_Public, data = df)
+```
+`r pander(summary(reg_2))`
+
+These new variables are quite significant and have increased the adjusted R^2 value all the way to `r summary(reg_2)$adj.r.squared`! 
+Still, this value represents under 2% of the variance being explained by the model. We can thus still improve.
+
+Our next option is to add years to our model. As year is continuous, we can first try the variable as a linear fit. Again, 
+there is a scale issue. We thus subtract 2020 and divide by 4 (the number of years in the data).
+
+```{r OLS_4}
+# Scale Year
+df$s_year <- (as.numeric(df$Year) - 2020)/4
+# Regression
+reg_3 <- lm(death_case_ratio ~ Administered_Dose1_Pop_Pct + Region_NorthEast + Region_South + Region_West + Food_Drink + Masks_Bus + Masks_Public + s_year, data = df)
+```
+`r pander(summary(reg_3))`
+
+Year is quite significant and increased the adjusted R^2 value all the way to `r summary(reg_3)$adj.r.squared`. There is
+still room for improvement. We assumed that year was linearly related to death/case, but time relationships are 
+rarely linear. Let's try using time as a dummy.
+
+
+```{r OLS_5}
+# Scale Year
+df$Year <- as.factor(df$Year)
+# Regression
+reg_4 <- lm(death_case_ratio ~ Administered_Dose1_Pop_Pct + Region_NorthEast + Region_South + Region_West + Food_Drink + Masks_Bus + Masks_Public + Year, data = df)
+```
+`r pander(summary(reg_4))`
+
+Year clearly was non-linear as each of the years is significant and their inclusion increased the adjusted R^2 value all the way 
+to `r summary(reg_4)$adj.r.squared`. Year2020 is a reference in this model.
+
+Still, the adjusted r^2 indicates we are only explaining 3.6% of the variance. Let's check to see if there are observations that 
+are hurting the model fit. To do this, we use cook's distance.
+
+## Leverage and Cook's Distance
+
+Let's start by plotting residuals.
+
+```{r res_plots}
+par(mfrow = c(2, 2))
+plot(reg_4)
+```
+We definitely  have several data points over the .5 cook's distance threshold. This means they are high leverage and 
+might be influencing our fit. Let's remove them.
+```{r rem_out}
+# Cook's distances
+cooks_distances <- cooks.distance(reg_4)
+# make a threshold
+threshold_99 <- quantile(cooks_distances, 0.99)
+# identify influential rows
+influential <- cooks_distances[(cooks_distances > threshold_99)]
+# get row numbers
+names_of_influential <- names(influential)
+# seperate influential outliers
+outliers <- df[names_of_influential,]
+# Remove outliers from data
+df_NO <- df %>% anti_join(outliers)
+# rerun model
+reg_5 <- lm(death_case_ratio ~ Administered_Dose1_Pop_Pct + Region_NorthEast + Region_South + Region_West + Food_Drink + Masks_Bus + Masks_Public + Year, data = df_NO)
+```
+`r pander(summary(reg_5))`
+
+Well, that helped. Now the adjusted R^2 is `r summary(reg_5)$adj.r.squared` and quite improved. Still, adjusted R^2 isn't up to the 30% lower bound we 
+prefer. Let's see if removing no-information values can help. There's a large number of 0 death/cases that might confuse the model. 
+Let's remove those and see if the fit improves.
+
+```{r OLS_6}
+#drop 0 information cases
+df_NO <- subset(df_NO, death_case_ratio>0)
+# rerun model
+reg_6 <- lm(death_case_ratio ~ Administered_Dose1_Pop_Pct + Region_NorthEast + Region_South + Region_West + Food_Drink + Masks_Bus + Masks_Public + Year, data = df_NO)
+```
+`r pander(summary(reg_6))`
+
+Well, that did it. The adjusted R^2 is now `r summary(reg_6)$adj.r.squared` and well over our threshold of 30%. 
+
+## Check OLS Assumptions
+
+We need to next check the assumptions of an OLS regression.
+OLS regression has the following assumptions:  
+1) Linearity
+2) No endogeneity
+3) Normality and homoscedasticity
+4) No autocorrelation
+5) no multicollinearity
+
+We start by plotting residuals.
+
+```{r model_diog}
+library(broom)
+model.diag.metrics <- augment(reg_6)
+
+ggplot(model.diag.metrics, aes(Administered_Dose1_Pop_Pct, death_case_ratio)) +
+  geom_point() +
+  stat_smooth(method = lm, se = FALSE) +
+  geom_segment(aes(xend = Administered_Dose1_Pop_Pct, yend = .fitted), color = "red", size = 0.3)
+```
+
+You'll notice that the data is split into two clusters with a small number of points below the 
+30% vaccination threshold we checked before fitting poorly to the trend line. This isn't unexpected,
+but we should keep this in mind as we check the assumptions.
+
+Next, let's run diagnostic plots.
+```{r model_diog_2}
+par(mfrow = c(2, 2))
+plot(reg_6)
+```
+Residuals vs. Fitted: This is used to check for linearity in the model. We are looking for a fairly 
+straight line here but the plot is curved.
+Normal Q-Q: This is used to check to see if the residuals are normally distributed. Since the plot 
+deviates from the dashed line, we probably don't have normal distribution of the residuals.
+Sacle-location: This is used to check for homogeneity of variance of the residuals (homoscedasticity). 
+The line is definitely not horizontal which indicates there might be heteroskedasticity.
+Residuals vs. leverage: There are still high leverage points in the data.
+
+It certainly seems like we have some violations of the OLS assumptions. Fortunately, we can transform 
+the Y and hopefully fix the issue. Let's first plot the death/case variable to see what's going on.
+`r hist(df_NO$death_case_ratio, breaks=20)`
+The data is certainly skewed right. With skewed data the prescribed method to fix this is to log transform. 
+This process is a linear transformation so shouldn't impact the model. Let's see what the distribution 
+looks like after doing so. 
+`r hist(log(df_NO$death_case_ratio), breaks=20)` 
+That's much better. Let's try re-running the model and the diagnostics.
+
+
+```{r OLS_update}
+reg_7 <- lm(log(death_case_ratio) ~ Administered_Dose1_Pop_Pct + Region_NorthEast + Region_South + Region_West + Food_Drink + Masks_Bus + Masks_Public + Year, data = df_NO)
+
+```
+`r pander(summary(reg_7))`
+
+The result is that our adjusted R^2 creeps up to `r summary(reg_7)$adj.r.squared` but the significant vars don't change. 
+Let's check the residuals.
+
+
+```{r res_check}
+par(mfrow = c(2, 2))
+plot(reg_7)
+```
+Much better. 
+Residuals vs. Fitted: line is straighter
+Normal Q-Q: The plot deviates from the dashed line but far less than before.
+Sacle-location: The line is still not horizontal which indicates there might be heteroskedasticity.
+Residuals vs. leverage: There are still high leverage points in the data but are now all under 4 standard deviations.
+
+It certainly seems like we still have some violations of the OLS assumptions. There are further steps we could take 
+to deal with this (interaction or polynomial terms, non-parametric, splines, etc.) but the goal here isn't to make 
+a perfect model. Rather it's to check the relationships between variables and the death/case ratio.
+
+## Conclusion
+
+Using the log transformed death/case model (see below) we can extract some insights from the model.
+`r pander(summary(reg_7))`
+First and foremost, the vaccination rathe certainly reduced the death/case rate as the coefficient in our model is negative 
+and significant. Similarly, imposing mask mandates (both in public and in businesses) also reduced the death/case rate. 
+Conversely, living in the NorthEast part of the US meant a higher death/case rate compared to all other regions. Finally, 
+the death/case rate dropped over time indicating the possibility of a survivor bias or a building immunity beyond the 
+vaccination rate.
+
+As we conducted this analysis we found several additional factors which might have been predictive but we lacked data on.
+There were several variants of the COVID-19 virus with different virulence levels that dominated the infections. We were 
+not able to find good data on that confound in a state by state level. Further, multiple vaccinations were available with 
+different efficacy rates and individuals took different combinations of vaccinations. While we did have some of that data, 
+it was extremely difficult for us, non-microbiologist, non-epidemiologists to interpret the information and we thus 
+decided to exclude it. Finally, there is little to no data on the re-infection rate. As many people developed immunity 
+from infection, this is a big piece of missing data in our model.
+
+In future, we believe that a better way to determine the relationship between vaccination and death/case would be to use 
+individual level data rather than state counts. This model then becomes far more predictive as we see outcomes on a case 
+by case basis rather than in total. With the data we used, a large amount of the variation between states is lost and 
+thus we can not be confident enough in our model to suggest policy changes from our results. Rather, we suggest following 
+the CDC recommendations to prevent disease transfer: Cover your mouth, wash your hands, stay home when you're sick.
+
+
